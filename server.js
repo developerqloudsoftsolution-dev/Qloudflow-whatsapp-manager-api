@@ -44,6 +44,6 @@ whatsappService.connect().catch((err) => {
     console.warn('[WhatsApp API Server] Initial connection notice:', err.message);
 });
 
-app.listen(PORT, () => {
-    console.log(`WhatsApp API Server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`WhatsApp API Server running on port ${PORT} (0.0.0.0)`);
 });
