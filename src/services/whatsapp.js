@@ -203,13 +203,13 @@ class WhatsAppService {
                     || msg.message?.viewOnceMessageV2?.message?.extendedTextMessage?.text;
 
                 if (messageText) {
-                    console.log(`[WhatsApp API] Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${cleanPhone}): ${messageText}`);
+                    console.log(`[WhatsApp API] Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${realPhone}): ${messageText}`);
                     const payload = {
                         event: 'message.received',
                         messageId: msg.key.id,
                         from: remoteJid,
                         whatsapp_id: remoteJid,
-                        phone: cleanPhone,
+                        phone: realPhone,
                         real_phone: realPhone,
                         sender_jid: senderJid,
                         pushName: msg.pushName || 'WhatsApp User',
