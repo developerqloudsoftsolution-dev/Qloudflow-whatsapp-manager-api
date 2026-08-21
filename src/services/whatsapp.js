@@ -4,27 +4,27 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL || 'http://127.0.0.1:8000/api/webhooks/whatsapp/incoming';
+let currentWebhookUrl = process.env.WEBHOOK_URL || 'http://127.0.0.1:8000/api/webhooks/whatsapp/incoming';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 // Helper to send webhook
 async function sendWebhook(payload) {
-    if (!WEBHOOK_URL) {
-        console.error('Webhook URL is not defined!');
+    if (!currentWebhookUrl) {
+        console.error('[WhatsApp Webhook] Webhook URL is not defined!');
         return;
     }
     try {
-        console.log('Sending webhook to:', WEBHOOK_URL);
-        await axios.post(WEBHOOK_URL, payload, {
+        console.log('[WhatsApp Webhook] Forwarding event to:', currentWebhookUrl);
+        await axios.post(currentWebhookUrl, payload, {
             headers: {
                 'X-Webhook-Signature': 'mock-signature-for-now',
                 'Accept': 'application/json'
             },
-            timeout: 8000
+            timeout: 10000
         });
-        console.log('Webhook sent successfully!');
+        console.log('[WhatsApp Webhook] Event forwarded successfully!');
     } catch (err) {
-        console.error('Webhook forwarding failed:', err.message, err.response?.data || '');
+        console.error('[WhatsApp Webhook] Webhook forwarding notice:', err.message, err.response?.status || '');
     }
 }
 
@@ -185,11 +185,24 @@ class WhatsAppService {
                     realPhone = senderJid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '').split(':')[0].replace(/\D/g, '');
                 }
 
-                const cleanPhone = realPhone || (isGroup ? remoteJid.replace(/\D/g, '') : senderJid.replace(/\D/g, ''));
-                const messageText = msg.message.conversation || msg.message.extendedTextMessage?.text;
+                // Extract message text from any Baileys message structure
+                const messageText = msg.message?.conversation 
+                    || msg.message?.extendedTextMessage?.text 
+                    || msg.message?.imageMessage?.caption 
+                    || msg.message?.videoMessage?.caption 
+                    || msg.message?.documentMessage?.caption 
+                    || msg.message?.buttonsResponseMessage?.selectedButtonId 
+                    || msg.message?.templateButtonReplyMessage?.selectedId 
+                    || msg.message?.listResponseMessage?.singleSelectReply?.selectedRowId 
+                    || msg.message?.ephemeralMessage?.message?.conversation 
+                    || msg.message?.ephemeralMessage?.message?.extendedTextMessage?.text 
+                    || msg.message?.viewOnceMessage?.message?.conversation 
+                    || msg.message?.viewOnceMessage?.message?.extendedTextMessage?.text 
+                    || msg.message?.viewOnceMessageV2?.message?.conversation 
+                    || msg.message?.viewOnceMessageV2?.message?.extendedTextMessage?.text;
 
                 if (messageText) {
-                    console.log(`Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${cleanPhone}): ${messageText}`);
+                    console.log(`[WhatsApp API] Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${cleanPhone}): ${messageText}`);
                     const payload = {
                         event: 'message.received',
                         messageId: msg.key.id,
@@ -206,6 +219,15 @@ class WhatsAppService {
                         groupId: isGroup ? remoteJid : null,
                         mediaUrl: null
                     };
+
+                    // Add to rolling in-memory buffer (fallback for cloud/local sync)
+                    if (!this.incomingQueue) this.incomingQueue = [];
+                    this.incomingQueue.push(payload);
+                    if (this.incomingQueue.length > 100) {
+                        this.incomingQueue.shift();
+                    }
+
+                    // Forward via Webhook
                     await sendWebhook(payload);
                 }
             });
@@ -319,6 +341,31 @@ class WhatsAppService {
         return result;
     }
 
+    setWebhookUrl(url) {
+        if (url && typeof url === 'string') {
+            currentWebhookUrl = url.trim();
+            console.log('[WhatsApp API] Webhook URL updated dynamically to:', currentWebhookUrl);
+            return true;
+        }
+        return false;
+    }
+
+    getWebhookUrl() {
+        return currentWebhookUrl;
+    }
+
+    getUnhandledMessages(sinceId = null) {
+        if (!this.incomingQueue) this.incomingQueue = [];
+        if (!sinceId) {
+            return this.incomingQueue.slice(-30);
+        }
+        const index = this.incomingQueue.findIndex(m => m.messageId === sinceId);
+        if (index === -1) {
+            return this.incomingQueue.slice(-30);
+        }
+        return this.incomingQueue.slice(index + 1);
+    }
+
     async sendMediaMessage(phone, mediaSource, caption = '', clientMessageId) {
         if (this.status !== 'connected' || !this.sock) {
             throw new Error('WhatsApp not connected');
@@ -334,39 +381,56 @@ class WhatsAppService {
             }
         }
 
-        console.log(`[WhatsApp API] Sending media to JID: ${jid} | Source: ${mediaSource} | Caption: ${caption ? caption.substring(0, 60) : 'none'}...`);
+        console.log(`[WhatsApp API] Sending media to JID: ${jid} | Caption: ${caption ? caption.substring(0, 60) : 'none'}...`);
 
         let imagePayload = null;
+        const bundledWelcome = path.resolve(__dirname, '../../assets/wellcome-creativity.jpg');
 
-        if (typeof mediaSource === 'string') {
-            if (fs.existsSync(mediaSource)) {
-                // Direct local absolute or relative file path
-                imagePayload = fs.readFileSync(mediaSource);
-            } else {
-                // Resolve relative path against Laravel public directory
-                const resolvedLaravelPath = path.resolve(__dirname, '../../../laravel-whatsapp-manager/public', mediaSource.replace(/^[\/\\]+/, ''));
-                if (fs.existsSync(resolvedLaravelPath)) {
-                    imagePayload = fs.readFileSync(resolvedLaravelPath);
+        try {
+            if (typeof mediaSource === 'string') {
+                if (mediaSource.includes('wellcome-creativity') && fs.existsSync(bundledWelcome)) {
+                    // Always prefer fast bundled high-res asset
+                    imagePayload = fs.readFileSync(bundledWelcome);
+                } else if (fs.existsSync(mediaSource)) {
+                    // Direct local file path
+                    imagePayload = fs.readFileSync(mediaSource);
                 } else if (mediaSource.startsWith('http://') || mediaSource.startsWith('https://')) {
-                    imagePayload = { url: mediaSource };
+                    if ((mediaSource.includes('localhost') || mediaSource.includes('127.0.0.1')) && fs.existsSync(bundledWelcome)) {
+                        imagePayload = fs.readFileSync(bundledWelcome);
+                    } else {
+                        imagePayload = { url: mediaSource };
+                    }
                 } else {
-                    imagePayload = { url: mediaSource };
+                    const resolvedLaravelPath = path.resolve(__dirname, '../../../laravel-whatsapp-manager/public', mediaSource.replace(/^[\/\\]+/, ''));
+                    if (fs.existsSync(resolvedLaravelPath)) {
+                        imagePayload = fs.readFileSync(resolvedLaravelPath);
+                    } else if (fs.existsSync(bundledWelcome)) {
+                        imagePayload = fs.readFileSync(bundledWelcome);
+                    } else {
+                        imagePayload = { url: mediaSource };
+                    }
                 }
+            } else if (Buffer.isBuffer(mediaSource)) {
+                imagePayload = mediaSource;
+            } else {
+                imagePayload = mediaSource;
             }
-        } else if (Buffer.isBuffer(mediaSource)) {
-            imagePayload = mediaSource;
-        } else {
-            imagePayload = mediaSource;
+
+            const messageOptions = {
+                image: imagePayload,
+                caption: caption || undefined
+            };
+
+            const result = await this.sock.sendMessage(jid, messageOptions);
+            console.log(`[WhatsApp API] Media sent successfully to ${jid}, messageId:`, result?.key?.id);
+            return result;
+        } catch (mediaErr) {
+            console.warn(`[WhatsApp API] Media sending failed (${mediaErr.message}), falling back to text reply...`);
+            if (caption) {
+                return await this.sendTextMessage(phone, caption, clientMessageId);
+            }
+            throw mediaErr;
         }
-
-        const messageOptions = {
-            image: imagePayload,
-            caption: caption || undefined
-        };
-
-        const result = await this.sock.sendMessage(jid, messageOptions);
-        console.log(`[WhatsApp API] Media sent successfully to ${jid}, messageId:`, result?.key?.id);
-        return result;
     }
 }
 

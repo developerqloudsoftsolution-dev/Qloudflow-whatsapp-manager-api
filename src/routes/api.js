@@ -118,4 +118,34 @@ router.post('/messages/send-media', async (req, res) => {
     }
 });
 
+// Get or Update Webhook Target URL
+router.get('/webhook/config', (req, res) => {
+    res.json({
+        success: true,
+        webhookUrl: whatsappService.getWebhookUrl()
+    });
+});
+
+router.post('/webhook/config', (req, res) => {
+    const { webhook_url } = req.body;
+    if (!webhook_url) {
+        return res.status(400).json({ success: false, message: 'webhook_url is required.' });
+    }
+    const updated = whatsappService.setWebhookUrl(webhook_url);
+    res.json({
+        success: updated,
+        webhookUrl: whatsappService.getWebhookUrl(),
+        message: updated ? 'Webhook URL configured successfully.' : 'Failed to update webhook URL.'
+    });
+// Get Unhandled Messages (for live polling fallback)
+router.get('/messages/unhandled', (req, res) => {
+    const sinceId = req.query.since || null;
+    const messages = whatsappService.getUnhandledMessages(sinceId);
+    res.json({
+        success: true,
+        count: messages.length,
+        messages: messages
+    });
+});
+
 module.exports = router;
