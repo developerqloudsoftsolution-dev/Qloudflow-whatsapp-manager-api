@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: whatsapp-api
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    disk:
+      name: auth-disk
+      mountPath: /app/auth_info
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: AUTH_DIR
+        value: /app/auth_info
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: API_KEY
+        sync: false
