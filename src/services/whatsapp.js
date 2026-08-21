@@ -4,27 +4,28 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-let currentWebhookUrl = process.env.WEBHOOK_URL || 'http://127.0.0.1:8000/api/webhooks/whatsapp/incoming';
+let currentWebhookUrl = process.env.WEBHOOK_URL || null;
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
-// Helper to send webhook
+// Helper to send webhook (optional — if not set, messages are queued for polling)
 async function sendWebhook(payload) {
     if (!currentWebhookUrl) {
-        console.error('[WhatsApp Webhook] Webhook URL is not defined!');
+        // Safe no-op: Messages are automatically stored in memory queue for client polling
         return;
     }
     try {
         console.log('[WhatsApp Webhook] Forwarding event to:', currentWebhookUrl);
         await axios.post(currentWebhookUrl, payload, {
             headers: {
-                'X-Webhook-Signature': 'mock-signature-for-now',
-                'Accept': 'application/json'
+                'X-Webhook-Signature': WEBHOOK_SECRET || 'mock-signature-for-now',
+                'Accept': 'application/json',
+                'Bypass-Tunnel-Reminder': 'true'
             },
             timeout: 10000
         });
         console.log('[WhatsApp Webhook] Event forwarded successfully!');
     } catch (err) {
-        console.error('[WhatsApp Webhook] Webhook forwarding notice:', err.message, err.response?.status || '');
+        console.warn('[WhatsApp Webhook] Webhook notice:', err.message);
     }
 }
 
