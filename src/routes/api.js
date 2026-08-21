@@ -137,6 +137,8 @@ router.post('/webhook/config', (req, res) => {
         webhookUrl: whatsappService.getWebhookUrl(),
         message: updated ? 'Webhook URL configured successfully.' : 'Failed to update webhook URL.'
     });
+});
+
 // Get Unhandled Messages (for live polling fallback)
 router.get('/messages/unhandled', (req, res) => {
     const sinceId = req.query.since || null;
