@@ -4,10 +4,6 @@ services:
     env: docker
     plan: free
     healthCheckPath: /health
-    disk:
-      name: auth-disk
-      mountPath: /app/auth_info
-      sizeGB: 1
     envVars:
       - key: PORT
         value: 3000
