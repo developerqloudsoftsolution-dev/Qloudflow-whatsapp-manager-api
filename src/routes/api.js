@@ -100,14 +100,19 @@ router.post('/messages/send', async (req, res) => {
 
 // Send Media
 router.post('/messages/send-media', async (req, res) => {
-    const { phone, media_url, media_path, caption, clientMessageId } = req.body;
+    const { phone, media_url, media_path, media_base64, mime_type, file_name, caption, clientMessageId } = req.body;
     
-    if (!phone || (!media_url && !media_path)) {
-        return res.status(400).json({ success: false, message: 'Phone and media_url or media_path are required.' });
+    if (!phone || (!media_url && !media_path && !media_base64)) {
+        return res.status(400).json({ success: false, message: 'Phone and media_url, media_path, or media_base64 are required.' });
     }
     
     try {
-        const result = await whatsappService.sendMediaMessage(phone, media_path || media_url, caption, clientMessageId);
+        const source = media_base64 || media_path || media_url;
+        const result = await whatsappService.sendMediaMessage(phone, source, caption, clientMessageId, {
+            mime_type,
+            file_name,
+            original_url: media_url
+        });
         res.json({
             success: true,
             messageId: result?.key?.id,

@@ -9,7 +9,8 @@ const PORT = process.env.PORT || 3000;
 const startTime = Date.now();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
 // Helper to format uptime
 function formatUptime(ms) {
@@ -24,6 +25,11 @@ function formatUptime(ms) {
     parts.push(`${seconds}s`);
     return parts.join(' ');
 }
+
+// Health Check for Render
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok', uptime: Math.floor((Date.now() - startTime) / 1000) });
+});
 
 // Root Landing & Status Dashboard
 app.get('/', (req, res) => {

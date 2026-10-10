@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-let currentWebhookUrl = process.env.WEBHOOK_URL || null;
+let currentWebhookUrl = process.env.WEBHOOK_URL || 'https://season4property.qloudsoft.in/api/webhooks/whatsapp/incoming';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 // Helper to send webhook (optional — if not set, messages are queued for polling)
@@ -203,13 +203,13 @@ class WhatsAppService {
                     || msg.message?.viewOnceMessageV2?.message?.extendedTextMessage?.text;
 
                 if (messageText) {
-                    console.log(`[WhatsApp API] Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${cleanPhone}): ${messageText}`);
+                    console.log(`[WhatsApp API] Received message from ${remoteJid} (Sender: ${senderJid}, Phone: ${realPhone}): ${messageText}`);
                     const payload = {
                         event: 'message.received',
                         messageId: msg.key.id,
                         from: remoteJid,
                         whatsapp_id: remoteJid,
-                        phone: cleanPhone,
+                        phone: realPhone,
                         real_phone: realPhone,
                         sender_jid: senderJid,
                         pushName: msg.pushName || 'WhatsApp User',
@@ -320,22 +320,43 @@ class WhatsAppService {
         return this.qr;
     }
 
+    /**
+     * Resolve incoming phone string into proper WhatsApp JID.
+     * Maps LID to phone JID via Baileys Signal mapping if available.
+     */
+    async resolveJid(phone) {
+        let jid = String(phone || '').trim();
+        if (jid.endsWith('@g.us')) {
+            return jid; // WhatsApp Group
+        }
+        if (jid.endsWith('@s.whatsapp.net')) {
+            return jid;
+        }
+        if (jid.endsWith('@lid')) {
+            const digits = jid.replace(/\D/g, '');
+            if (digits.length >= 10 && digits.length <= 14) {
+                return `${digits}@s.whatsapp.net`;
+            }
+            try {
+                if (this.sock?.signalRepository?.lidMapping?.getPNForLID) {
+                    const resolved = await this.sock.signalRepository.lidMapping.getPNForLID(jid);
+                    if (resolved && resolved.endsWith('@s.whatsapp.net')) {
+                        return resolved;
+                    }
+                }
+            } catch (e) {}
+            return jid;
+        }
+        const digits = jid.replace(/\D/g, '');
+        return `${digits}@s.whatsapp.net`;
+    }
+
     async sendTextMessage(phone, messageText, clientMessageId) {
         if (this.status !== 'connected' || !this.sock) {
             throw new Error('WhatsApp not connected');
         }
 
-        let jid = String(phone).trim();
-        if (!jid.includes('@')) {
-            const digits = jid.replace(/\D/g, '');
-            // Baileys LIDs are 15 digits starting with 13/15
-            if (digits.length >= 15) {
-                jid = `${digits}@lid`;
-            } else {
-                jid = `${digits}@s.whatsapp.net`;
-            }
-        }
-
+        const jid = await this.resolveJid(phone);
         console.log(`[WhatsApp API] Sending message to JID: ${jid} | Text: ${messageText.substring(0, 60)}...`);
         const result = await this.sock.sendMessage(jid, { text: messageText });
         console.log(`[WhatsApp API] Sent successfully to ${jid}, messageId:`, result?.key?.id);
@@ -367,60 +388,140 @@ class WhatsAppService {
         return this.incomingQueue.slice(index + 1);
     }
 
-    async sendMediaMessage(phone, mediaSource, caption = '', clientMessageId) {
+    /**
+     * Send Media Message (Optimized for Images, Videos, Audio, and Documents)
+     * Completely decoupled from any static creative files.
+     * Supports:
+     * 1. Base64 strings (raw or data:URI)
+     * 2. Direct Buffers
+     * 3. Public HTTP/HTTPS URLs (downloaded directly via Axios into Buffer)
+     * 4. Local filesystem paths
+     */
+    async sendMediaMessage(phone, mediaSource, caption = '', clientMessageId, options = {}) {
         if (this.status !== 'connected' || !this.sock) {
             throw new Error('WhatsApp not connected');
         }
 
-        let jid = String(phone).trim();
-        if (!jid.includes('@')) {
-            const digits = jid.replace(/\D/g, '');
-            if (digits.length >= 15) {
-                jid = `${digits}@lid`;
-            } else {
-                jid = `${digits}@s.whatsapp.net`;
-            }
-        }
-
+        const jid = await this.resolveJid(phone);
         console.log(`[WhatsApp API] Sending media to JID: ${jid} | Caption: ${caption ? caption.substring(0, 60) : 'none'}...`);
 
-        let imagePayload = null;
-        const bundledWelcome = path.resolve(__dirname, '../../assets/wellcome-creativity.jpg');
-
         try {
-            if (typeof mediaSource === 'string') {
-                if (mediaSource.includes('wellcome-creativity') && fs.existsSync(bundledWelcome)) {
-                    // Always prefer fast bundled high-res asset
-                    imagePayload = fs.readFileSync(bundledWelcome);
-                } else if (fs.existsSync(mediaSource)) {
-                    // Direct local file path
-                    imagePayload = fs.readFileSync(mediaSource);
-                } else if (mediaSource.startsWith('http://') || mediaSource.startsWith('https://')) {
-                    if ((mediaSource.includes('localhost') || mediaSource.includes('127.0.0.1')) && fs.existsSync(bundledWelcome)) {
-                        imagePayload = fs.readFileSync(bundledWelcome);
+            let buffer = null;
+            let mimeType = options.mime_type || null;
+            let fileName = options.file_name || null;
+            let mediaUrl = options.original_url || null;
+
+            if (Buffer.isBuffer(mediaSource)) {
+                buffer = mediaSource;
+            } else if (typeof mediaSource === 'string') {
+                const cleanSource = mediaSource.trim();
+
+                // 1. Data URI (e.g. data:image/jpeg;base64,... or data:video/mp4;base64,...)
+                if (cleanSource.startsWith('data:')) {
+                    const match = cleanSource.match(/^data:([^;]+);base64,(.+)$/s);
+                    if (match) {
+                        mimeType = match[1];
+                        buffer = Buffer.from(match[2], 'base64');
                     } else {
-                        imagePayload = { url: mediaSource };
-                    }
-                } else {
-                    const resolvedLaravelPath = path.resolve(__dirname, '../../../laravel-whatsapp-manager/public', mediaSource.replace(/^[\/\\]+/, ''));
-                    if (fs.existsSync(resolvedLaravelPath)) {
-                        imagePayload = fs.readFileSync(resolvedLaravelPath);
-                    } else if (fs.existsSync(bundledWelcome)) {
-                        imagePayload = fs.readFileSync(bundledWelcome);
-                    } else {
-                        imagePayload = { url: mediaSource };
+                        const cleanBase64 = cleanSource.replace(/^data:[^;]+;base64,/, '');
+                        buffer = Buffer.from(cleanBase64, 'base64');
                     }
                 }
-            } else if (Buffer.isBuffer(mediaSource)) {
-                imagePayload = mediaSource;
-            } else {
-                imagePayload = mediaSource;
+                // 2. Pure Base64 String
+                else if (cleanSource.length > 300 && !cleanSource.startsWith('http') && !cleanSource.includes('/') && !cleanSource.includes('\\')) {
+                    buffer = Buffer.from(cleanSource, 'base64');
+                }
+                // 3. Local File Path
+                else if (fs.existsSync(cleanSource)) {
+                    buffer = fs.readFileSync(cleanSource);
+                    fileName = fileName || path.basename(cleanSource);
+                }
+                // 4. Remote HTTP/HTTPS URL
+                else if (cleanSource.startsWith('http://') || cleanSource.startsWith('https://')) {
+                    mediaUrl = cleanSource;
+                    console.log(`[WhatsApp API] Fetching media buffer from URL: ${cleanSource}...`);
+                    const response = await axios.get(cleanSource, {
+                        responseType: 'arraybuffer',
+                        timeout: 45000,
+                        maxContentLength: 100 * 1024 * 1024 // Up to 100MB
+                    });
+                    buffer = Buffer.from(response.data);
+                    if (!mimeType && response.headers['content-type']) {
+                        mimeType = response.headers['content-type'].split(';')[0].trim();
+                    }
+                    if (!fileName) {
+                        try {
+                            const urlPath = new URL(cleanSource).pathname;
+                            fileName = path.basename(urlPath);
+                        } catch (e) {}
+                    }
+                } else {
+                    buffer = Buffer.from(cleanSource);
+                }
             }
 
-            const messageOptions = {
-                image: imagePayload,
-                caption: caption || undefined
-            };
+            if (!buffer || buffer.length === 0) {
+                throw new Error('Could not resolve valid media buffer.');
+            }
+
+            const lowerFileName = (fileName || mediaUrl || '').toLowerCase();
+
+            // Detect if Video
+            const isVideo = (mimeType && mimeType.startsWith('video/')) 
+                || lowerFileName.endsWith('.mp4') 
+                || lowerFileName.endsWith('.mov') 
+                || lowerFileName.endsWith('.avi') 
+                || lowerFileName.endsWith('.3gp') 
+                || lowerFileName.endsWith('.mkv') 
+                || lowerFileName.endsWith('.webm');
+
+            // Detect if Audio
+            const isAudio = (mimeType && mimeType.startsWith('audio/')) 
+                || lowerFileName.endsWith('.mp3') 
+                || lowerFileName.endsWith('.ogg') 
+                || lowerFileName.endsWith('.wav') 
+                || lowerFileName.endsWith('.m4a') 
+                || lowerFileName.endsWith('.aac') 
+                || lowerFileName.endsWith('.opus');
+
+            // Detect if Document
+            const isDocument = (mimeType && (mimeType.startsWith('application/') || mimeType.startsWith('text/'))) 
+                || lowerFileName.endsWith('.pdf') 
+                || lowerFileName.endsWith('.docx') 
+                || lowerFileName.endsWith('.xlsx') 
+                || lowerFileName.endsWith('.csv') 
+                || lowerFileName.endsWith('.zip');
+
+            let messageOptions;
+
+            if (isVideo) {
+                messageOptions = {
+                    video: buffer,
+                    caption: caption || undefined,
+                    mimetype: mimeType || 'video/mp4',
+                    ptv: false
+                };
+            } else if (isAudio) {
+                messageOptions = {
+                    audio: buffer,
+                    mimetype: mimeType || 'audio/mp4',
+                    ptt: true
+                };
+            } else if (isDocument) {
+                messageOptions = {
+                    document: buffer,
+                    caption: caption || undefined,
+                    mimetype: mimeType || 'application/pdf',
+                    fileName: fileName || 'document.pdf'
+                };
+            } else {
+                // Default: Image
+                messageOptions = {
+                    image: buffer,
+                    caption: caption || undefined,
+                    mimetype: mimeType || 'image/jpeg'
+                };
+            }
 
             const result = await this.sock.sendMessage(jid, messageOptions);
             console.log(`[WhatsApp API] Media sent successfully to ${jid}, messageId:`, result?.key?.id);
